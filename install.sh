@@ -110,6 +110,8 @@ if [ -n "${DUCKTERM_PAIR_TOKEN:-}" ]; then
     "$BIN" pair --token "$DUCKTERM_PAIR_TOKEN"
     say "⚠ no DUCKTERM_PAIR_USER — push fan-out falls back to 'anon'; re-pair with --user later"
   fi
+elif [ -f "$HOME/.duckterm/hookd-config.json" ]; then
+  say "already paired — keeping existing ~/.duckterm/hookd-config.json"
 else
   say "not paired yet — after install run:"
   say "  $BIN_NAME pair --token <pair-token> --user <account-id>   (from the DuckTerm app)"
