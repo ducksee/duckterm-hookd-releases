@@ -90,8 +90,12 @@ elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
 else
   BIN_DIR="$HOME/.local/bin"; mkdir -p "$BIN_DIR"
 fi
-${SUDO:-} cp "$tmp/$BIN_NAME" "$BIN_DIR/$BIN_NAME"
-${SUDO:-} chmod 755 "$BIN_DIR/$BIN_NAME"
+# Atomic replace: cp onto a RUNNING binary fails with ETXTBSY on Linux.
+# Write a temp file beside it and mv over — the running process keeps its
+# old inode, the path points at the new binary for the next (re)start.
+${SUDO:-} cp "$tmp/$BIN_NAME" "$BIN_DIR/.$BIN_NAME.new"
+${SUDO:-} chmod 755 "$BIN_DIR/.$BIN_NAME.new"
+${SUDO:-} mv -f "$BIN_DIR/.$BIN_NAME.new" "$BIN_DIR/$BIN_NAME"
 BIN="$BIN_DIR/$BIN_NAME"
 say "installed $BIN ($("$BIN" version))"
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) say "note: add $BIN_DIR to your PATH";; esac
