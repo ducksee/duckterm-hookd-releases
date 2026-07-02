@@ -25,6 +25,18 @@ brew services start duckterm-hookd
 Starting the service before pairing is safe — it waits and retries with
 backoff until you pair.
 
+### One-line install (Linux servers / no Homebrew)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ducksee/duckterm-hookd-releases/main/install.sh \
+  | DUCKTERM_PAIR_TOKEN=<pair-token> DUCKTERM_PAIR_USER=<account-id> sh
+```
+
+Downloads the right binary, verifies SHA256, pairs, wires agent hooks, and
+registers a supervisor (systemd system unit with root/sudo, else a user unit
+with linger; launchd on macOS). Omit the env vars to pair later — the
+service self-heals once you run `pair`.
+
 ### Manual (any host)
 
 Download the tarball for your platform from the latest release, verify with
