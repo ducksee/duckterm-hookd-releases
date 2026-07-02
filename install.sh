@@ -60,9 +60,11 @@ if [ -n "${DUCKTERM_TARBALL:-}" ]; then
 else
   VER="${DUCKTERM_VERSION:-}"
   if [ -z "$VER" ]; then
-    VER=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
-      | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/') \
-      || die "could not resolve latest version"
+    # NB: $(pipeline) exits with the LAST command's status — a failed curl
+    # still leaves sed exiting 0, so test the value, not the pipeline.
+    VER=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
+      | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/') || true
+    [ -n "$VER" ] || die "could not resolve latest version (set DUCKTERM_VERSION=… or check network/proxy)"
   fi
   ASSET="${BIN_NAME}_${OS}-${ARCH}.tar.gz"
   URL="https://github.com/$REPO/releases/download/v${VER}/${ASSET}"
