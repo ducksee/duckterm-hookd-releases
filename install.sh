@@ -118,6 +118,17 @@ fi
 
 if [ "$OS" = "darwin" ]; then
   PLIST="$HOME/Library/LaunchAgents/com.duckterm.hookd.plist"
+  if [ -e "$PLIST" ]; then
+    # Existing agent may carry site-specific args/env (deploy-host.sh adds
+    # --enable-web etc.). Keep it; this run is a binary upgrade + restart.
+    say "existing $PLIST found — keeping it (binary upgraded), restarting"
+    launchctl kickstart -k "gui/$(id -u)/com.duckterm.hookd" 2>/dev/null \
+      || { launchctl unload "$PLIST" 2>/dev/null; launchctl load -w "$PLIST"; }
+    say "launchd service restarted"
+    say "─── done ───"
+    say "verify from the DuckTerm app: Settings → Agent hooks → Local push / APN push"
+    exit 0
+  fi
   mkdir -p "$HOME/Library/LaunchAgents" "$HOME/.duckterm"
   cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -157,12 +168,21 @@ WantedBy=default.target"
   if [ "$IS_ROOT" = 1 ] || [ -n "${SUDO:-}" ]; then
     # system unit — reliable on headless servers, no user-bus/linger traps
     UNIT=/etc/systemd/system/duckterm-hookd.service
-    printf '%s\n' "$UNIT_BODY" | sed -e "s|WantedBy=default.target|WantedBy=multi-user.target|" \
-      -e "/^\[Service\]/a\\
+    if [ -e "$UNIT" ]; then
+      # An existing unit may carry site-specific config (deploy-host.sh
+      # writes env like DUCKTERM_LIVETAIL_*, --enable-web). Never downgrade
+      # it — treat this run as a binary upgrade and just restart.
+      say "existing $UNIT found — keeping it (binary upgraded), restarting"
+      ${SUDO:-} systemctl daemon-reload
+      ${SUDO:-} systemctl restart duckterm-hookd
+    else
+      printf '%s\n' "$UNIT_BODY" | sed -e "s|WantedBy=default.target|WantedBy=multi-user.target|" \
+        -e "/^\[Service\]/a\\
 User=$(id -un)" | ${SUDO:-} tee "$UNIT" >/dev/null
-    ${SUDO:-} systemctl daemon-reload
-    ${SUDO:-} systemctl enable --now duckterm-hookd
-    say "systemd system service enabled + started"
+      ${SUDO:-} systemctl daemon-reload
+      ${SUDO:-} systemctl enable --now duckterm-hookd
+      say "systemd system service enabled + started"
+    fi
   else
     # user unit — needs a live user bus; linger keeps it alive post-logout
     mkdir -p "$HOME/.config/systemd/user"
