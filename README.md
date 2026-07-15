@@ -14,9 +14,12 @@ Clipboard carries it over):
 
 ### Homebrew (macOS / Linux)
 
+`ducksee/tap` is a third-party tap maintained by the DuckTerm authors, not
+Homebrew. Install the fully-qualified formula — Homebrew adds the tap
+automatically and trusts only this formula:
+
 ```sh
-brew tap ducksee/tap
-brew install duckterm-hookd
+brew install ducksee/tap/duckterm-hookd
 duckterm-hookd pair --token <pair-token> --user <account-id>
 duckterm-hookd install                 # wire agent hooks (non-destructive)
 brew services start duckterm-hookd
@@ -24,6 +27,21 @@ brew services start duckterm-hookd
 
 Starting the service before pairing is safe — it waits and retries with
 backoff until you pair.
+
+Check version, pairing, and installed-hook state anytime:
+```sh
+duckterm-hookd status
+```
+
+Upgrade (Homebrew won't restart a running service for you):
+```sh
+brew upgrade duckterm-hookd && brew services restart duckterm-hookd
+```
+
+Uninstall (removes only DuckTerm's own hook entries, then the binary):
+```sh
+duckterm-hookd uninstall && brew services stop duckterm-hookd && brew uninstall duckterm-hookd
+```
 
 ### One-line install (Linux servers / no Homebrew)
 
