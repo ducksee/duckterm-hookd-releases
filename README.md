@@ -40,6 +40,11 @@ upgrades and restarts the service):
 duckterm-hookd upgrade
 ```
 
+Prefer the manual steps? Targeted refresh (not a full `brew update`):
+```sh
+git -C "$(brew --repo ducksee/tap)" pull --ff-only && brew upgrade duckterm-hookd && brew services restart duckterm-hookd
+```
+
 Uninstall (removes only DuckTerm's own hook entries, then the binary):
 ```sh
 duckterm-hookd uninstall && brew services stop duckterm-hookd && brew uninstall duckterm-hookd
