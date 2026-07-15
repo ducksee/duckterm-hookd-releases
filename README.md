@@ -33,9 +33,11 @@ Check version, pairing, and installed-hook state anytime:
 duckterm-hookd status
 ```
 
-Upgrade (Homebrew won't restart a running service for you):
+Upgrade — one command (Homebrew doesn't reliably auto-pull third-party taps, so
+plain `brew upgrade` can miss updates; this does a targeted tap refresh, then
+upgrades and restarts the service):
 ```sh
-brew upgrade duckterm-hookd && brew services restart duckterm-hookd
+duckterm-hookd upgrade
 ```
 
 Uninstall (removes only DuckTerm's own hook entries, then the binary):
