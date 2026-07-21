@@ -3,17 +3,16 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/ducksee/duckterm-hookd-releases/main/install.sh | sh
 #
-# With pairing baked in (token + user from the DuckTerm app's Agent-hooks
-# screen — long-press the snippet to copy them):
+# With the recommended one-paste QR pairing path:
 #
-#   curl -fsSL .../install.sh | DUCKTERM_PAIR_TOKEN=xx DUCKTERM_PAIR_USER=yy sh
+#   curl -fsSL .../install.sh | DUCKTERM_PAIR_QR=1 sh
 #
 # What it does:
 #   1. Detects OS + arch, downloads the matching static binary tarball
 #      from the latest release, verifies SHA256.
 #   2. Installs to /usr/local/bin (sudo/root) or ~/.local/bin.
-#   3. Pairs (if DUCKTERM_PAIR_TOKEN is set) — before the service starts,
-#      so the first connection is already authenticated.
+#   3. Pairs once (QR by default; legacy token env remains compatible) —
+#      before the service starts, so the first connection is authenticated.
 #   4. `duckterm-hookd install` — wires agent hooks (append-only).
 #   5. Registers a supervisor:
 #        macOS → launchd LaunchAgent (per-user)
@@ -22,8 +21,10 @@
 #
 # Env knobs:
 #   DUCKTERM_VERSION=0.1.0      pin a version (default: latest)
-#   DUCKTERM_PAIR_TOKEN=…       pair token (from the iOS app)
-#   DUCKTERM_PAIR_USER=…        tenant/user id (from the iOS app)
+#   DUCKTERM_PAIR_QR=1          render a QR for the DuckTerm app to scan
+#   DUCKTERM_PAIR_TOKEN=…       legacy pairing bearer
+#   DUCKTERM_PAIR_USER=…        tenant/user id paired with legacy bearer
+#   DUCKTERM_NO_UI=1            skip the bundled local Web UI snapshot
 #   DUCKTERM_NO_SERVICE=1       skip supervisor registration
 #   DUCKTERM_TARBALL=/path.tgz  install from a local tarball (offline)
 #
@@ -38,6 +39,19 @@ BIN_NAME="duckterm-hookd"
 
 say()  { printf '\033[1;36m[hookd]\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m[hookd]\033[0m %s\n' "$*" >&2; exit 1; }
+
+# A partial pair request used to write an anonymous config and tell the user
+# to pair a second time with --user. Fail before downloading or installing
+# anything instead: the App always supplies both values in one paste.
+if [ "${DUCKTERM_PAIR_QR:-}" = "1" ] && { [ -n "${DUCKTERM_PAIR_TOKEN:-}" ] || [ -n "${DUCKTERM_PAIR_USER:-}" ]; }; then
+  die "choose one pairing method: DUCKTERM_PAIR_QR=1 or the legacy token/user pair"
+fi
+if [ -n "${DUCKTERM_PAIR_TOKEN:-}" ] && [ -z "${DUCKTERM_PAIR_USER:-}" ]; then
+  die "DUCKTERM_PAIR_USER is required with DUCKTERM_PAIR_TOKEN; copy the complete command from DuckTerm"
+fi
+if [ -z "${DUCKTERM_PAIR_TOKEN:-}" ] && [ -n "${DUCKTERM_PAIR_USER:-}" ]; then
+  die "DUCKTERM_PAIR_TOKEN is required with DUCKTERM_PAIR_USER; copy the complete command from DuckTerm"
+fi
 
 # ---- detect os/arch ------------------------------------------------------
 case "$(uname -s)" in
@@ -102,19 +116,26 @@ BIN="$BIN_DIR/$BIN_NAME"
 say "installed $BIN ($("$BIN" version))"
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) say "note: add $BIN_DIR to your PATH";; esac
 
+# ---- bootstrap bundled Web UI -------------------------------------------
+# Release archives carry a verified compatibility snapshot so first use does
+# not depend on GitHub/DNS/proxy availability. Bootstrap never replaces a
+# valid existing UI; `duckterm-hookd ui upgrade` remains independently usable.
+if [ "${DUCKTERM_NO_UI:-}" != "1" ] && [ -f "$tmp/duckterm-hookd-web.tar.gz" ]; then
+  "$BIN" ui bootstrap "$tmp/duckterm-hookd-web.tar.gz" \
+    || say "⚠ bundled Web UI install failed — Hookd will use its emergency page; retry with '$BIN_NAME ui upgrade'"
+fi
+
 # ---- pair (before the service starts — first connect is authenticated) ---
-if [ -n "${DUCKTERM_PAIR_TOKEN:-}" ]; then
-  if [ -n "${DUCKTERM_PAIR_USER:-}" ]; then
-    "$BIN" pair --token "$DUCKTERM_PAIR_TOKEN" --user "$DUCKTERM_PAIR_USER"
-  else
-    "$BIN" pair --token "$DUCKTERM_PAIR_TOKEN"
-    say "⚠ no DUCKTERM_PAIR_USER — push fan-out falls back to 'anon'; re-pair with --user later"
-  fi
+if [ "${DUCKTERM_PAIR_QR:-}" = "1" ]; then
+  "$BIN" pair --qr
+elif [ -n "${DUCKTERM_PAIR_TOKEN:-}" ]; then
+  "$BIN" pair --token "$DUCKTERM_PAIR_TOKEN" --user "$DUCKTERM_PAIR_USER"
 elif [ -f "$HOME/.duckterm/hookd-config.json" ]; then
   say "already paired — keeping existing ~/.duckterm/hookd-config.json"
 else
-  say "not paired yet — after install run:"
-  say "  $BIN_NAME pair --token <pair-token> --user <account-id>   (from the DuckTerm app)"
+  say "not paired yet — choose ONE pairing method (do not run both):"
+  say "  $BIN_NAME pair --qr                                      (scan once in the DuckTerm app)"
+  say "  or: $BIN_NAME pair --token <legacy-pair-token> --user <account-id>"
   say "  (the service self-heals: it picks pairing up on its next retry, no restart needed)"
 fi
 
@@ -134,7 +155,7 @@ if [ "$OS" = "darwin" ]; then
       || { launchctl unload "$PLIST" 2>/dev/null; launchctl load -w "$PLIST"; }
     say "launchd service restarted"
     say "─── done ───"
-    say "verify from the DuckTerm app: Settings → Agent hooks → Local push / APN push"
+    say "verify from the DuckTerm app: Settings → Agent notifications → Verify"
     exit 0
   fi
   mkdir -p "$HOME/Library/LaunchAgents" "$HOME/.duckterm"
@@ -203,4 +224,4 @@ User=$(id -un)" | ${SUDO:-} tee "$UNIT" >/dev/null
 fi
 
 say "─── done ───"
-say "verify from the DuckTerm app: Settings → Agent hooks → Local push / APN push"
+say "verify from the DuckTerm app: Settings → Agent notifications → Verify"
