@@ -26,6 +26,8 @@
 #   DUCKTERM_PAIR_USER=…        tenant/user id paired with legacy bearer
 #   DUCKTERM_NO_UI=1            skip the bundled local Web UI snapshot
 #   DUCKTERM_NO_SERVICE=1       skip supervisor registration
+#   DUCKTERM_BIN_DIR=/path      explicit binary directory (default: system/user)
+#   DUCKTERM_SYSV_INIT_DIR=…    installer-test/staging override (default: /etc/init.d)
 #   DUCKTERM_TARBALL=/path.tgz  install from a local tarball (offline)
 #
 # brew users: prefer `brew install ducksee/tap/duckterm-hookd` +
@@ -39,6 +41,57 @@ BIN_NAME="duckterm-hookd"
 
 say()  { printf '\033[1;36m[hookd]\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m[hookd]\033[0m %s\n' "$*" >&2; exit 1; }
+
+valid_version() {
+  printf '%s\n' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
+}
+
+resolve_latest_version() {
+  # The release repository's raw pointer is quota-free and travels over the
+  # same host as this installer. Anonymous api.github.com has a shared-IP rate
+  # limit that is routinely exhausted by proxies, schools, offices, and VPNs.
+  candidate=$(curl -fsSL --connect-timeout 10 --max-time 20 \
+    "https://raw.githubusercontent.com/$REPO/main/LATEST" 2>/dev/null \
+    | tr -d '\r\n') || candidate=""
+  if [ -n "$candidate" ] && valid_version "$candidate"; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+
+  # Older release repositories may not have LATEST yet. Follow the public
+  # release redirect without consuming API quota.
+  effective=$(curl -fsSL --connect-timeout 10 --max-time 20 -o /dev/null \
+    -w '%{url_effective}' "https://github.com/$REPO/releases/latest" 2>/dev/null) \
+    || effective=""
+  candidate=${effective##*/}
+  candidate=${candidate#v}
+  if [ -n "$candidate" ] && valid_version "$candidate"; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+
+  # Last compatibility fallback. Treat rate-limit/error JSON as a miss rather
+  # than fabricating a version from an arbitrary response.
+  candidate=$(curl -fsSL --connect-timeout 10 --max-time 20 \
+    "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
+    | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/') \
+    || candidate=""
+  if [ -n "$candidate" ] && valid_version "$candidate"; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  return 1
+}
+
+is_wsl() {
+  [ -n "${WSL_DISTRO_NAME:-}" ] || [ -n "${WSL_INTEROP:-}" ] \
+    || grep -Eqi '(microsoft|wsl)' /proc/sys/kernel/osrelease /proc/version 2>/dev/null
+}
+
+systemd_is_pid1() {
+  [ "$(cat /proc/1/comm 2>/dev/null || true)" = "systemd" ] \
+    && command -v systemctl >/dev/null 2>&1
+}
 
 # A partial pair request used to write an anonymous config and tell the user
 # to pair a second time with --user. Fail before downloading or installing
@@ -66,21 +119,35 @@ case "$(uname -m)" in
 esac
 say "platform: $OS-$ARCH"
 
+IS_WSL=0
+if [ "$OS" = "linux" ] && is_wsl; then IS_WSL=1; fi
+WSL_SYSV=0
+# WSL1 cannot run systemd. Use Ubuntu's SysV/start-stop-daemon backend and a
+# Windows-login launcher instead; WSL2 with systemd continues down the normal
+# systemd path.
+if [ "$OS" = "linux" ] && [ "${DUCKTERM_NO_SERVICE:-}" != "1" ] && ! systemd_is_pid1; then
+  if [ "$IS_WSL" = 1 ]; then
+    WSL_SYSV=1
+    say "WSL without systemd detected — installing a managed SysV service"
+  else
+  die "systemd is not running. Set DUCKTERM_NO_SERVICE=1 for a foreground install, or install Hookd under this host's service manager"
+  fi
+fi
+
 # ---- download ------------------------------------------------------------
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+VER="${DUCKTERM_VERSION:-}"
 if [ -n "${DUCKTERM_TARBALL:-}" ]; then
   say "using local tarball $DUCKTERM_TARBALL"
   cp "$DUCKTERM_TARBALL" "$tmp/pkg.tar.gz"
 else
-  VER="${DUCKTERM_VERSION:-}"
   if [ -z "$VER" ]; then
-    # NB: $(pipeline) exits with the LAST command's status — a failed curl
-    # still leaves sed exiting 0, so test the value, not the pipeline.
-    VER=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
-      | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/') || true
-    [ -n "$VER" ] || die "could not resolve latest version (set DUCKTERM_VERSION=… or check network/proxy)"
+    VER=$(resolve_latest_version) \
+      || die "could not resolve latest version from GitHub releases (set DUCKTERM_VERSION=… or check network/proxy)"
   fi
+  valid_version "$VER" || die "DUCKTERM_VERSION must be X.Y.Z (got '$VER')"
   ASSET="${BIN_NAME}_${OS}-${ARCH}.tar.gz"
+  if [ "$IS_WSL" = 1 ]; then ASSET="${BIN_NAME}_${OS}-${ARCH}-wsl.tar.gz"; fi
   URL="https://github.com/$REPO/releases/download/v${VER}/${ASSET}"
   say "downloading $ASSET (v$VER)"
   curl -fsSL -o "$tmp/pkg.tar.gz" "$URL" || die "download failed: $URL"
@@ -99,7 +166,9 @@ tar -xzf "$tmp/pkg.tar.gz" -C "$tmp"
 
 # ---- install binary ------------------------------------------------------
 IS_ROOT=0; [ "$(id -u)" = "0" ] && IS_ROOT=1
-if [ "$IS_ROOT" = 1 ] || [ -w /usr/local/bin ]; then
+if [ -n "${DUCKTERM_BIN_DIR:-}" ]; then
+  BIN_DIR=$DUCKTERM_BIN_DIR; mkdir -p "$BIN_DIR"
+elif [ "$IS_ROOT" = 1 ] || [ -w /usr/local/bin ]; then
   BIN_DIR=/usr/local/bin
 elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
   BIN_DIR=/usr/local/bin; SUDO=sudo
@@ -113,7 +182,20 @@ ${SUDO:-} cp "$tmp/$BIN_NAME" "$BIN_DIR/.$BIN_NAME.new"
 ${SUDO:-} chmod 755 "$BIN_DIR/.$BIN_NAME.new"
 ${SUDO:-} mv -f "$BIN_DIR/.$BIN_NAME.new" "$BIN_DIR/$BIN_NAME"
 BIN="$BIN_DIR/$BIN_NAME"
-say "installed $BIN ($("$BIN" version))"
+if ! installed_version=$("$BIN" version 2>&1); then
+  die "installed binary could not start on $OS-$ARCH (this host may require an unpacked/compatible release)"
+fi
+case "$installed_version" in
+  "duckterm-hookd "*) ;;
+  *) die "installed binary returned an invalid version response" ;;
+esac
+if [ -n "$VER" ]; then
+  case "$installed_version" in
+    "duckterm-hookd $VER"|"duckterm-hookd $VER ("*) ;;
+    *) die "installed binary version does not match requested v$VER" ;;
+  esac
+fi
+say "installed $BIN ($installed_version)"
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) say "note: add $BIN_DIR to your PATH";; esac
 
 # ---- bootstrap bundled Web UI -------------------------------------------
@@ -144,6 +226,100 @@ fi
 
 # ---- supervisor ----------------------------------------------------------
 [ "${DUCKTERM_NO_SERVICE:-}" = "1" ] && { say "skipping service (DUCKTERM_NO_SERVICE=1). Run: $BIN_NAME serve"; exit 0; }
+if [ "$WSL_SYSV" = 1 ]; then
+  if [ "$IS_ROOT" != 1 ] && [ -z "${SUDO:-}" ]; then
+    die "WSL1 service installation requires root or passwordless sudo"
+  fi
+  SYSV_INIT_DIR="${DUCKTERM_SYSV_INIT_DIR:-/etc/init.d}"
+  SYSV_INIT="$SYSV_INIT_DIR/duckterm-hookd"
+  SERVICE_USER=$(id -un)
+  SERVICE_HOME=$HOME
+  SYSV_STAGE="$tmp/duckterm-hookd.init"
+  cat > "$SYSV_STAGE" <<EOF
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          duckterm-hookd
+# Required-Start:    \$network
+# Required-Stop:     \$network
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: DuckTerm Hookd background service
+### END INIT INFO
+
+NAME=duckterm-hookd
+DAEMON="$BIN"
+SERVICE_USER="$SERVICE_USER"
+SERVICE_HOME="$SERVICE_HOME"
+PIDFILE=/var/run/duckterm-hookd.pid
+LOGFILE="$SERVICE_HOME/.duckterm/hookd.log"
+
+is_running() {
+  [ -s "\$PIDFILE" ] || return 1
+  pid=\$(cat "\$PIDFILE" 2>/dev/null) || return 1
+  kill -0 "\$pid" 2>/dev/null
+}
+
+case "\${1:-}" in
+  start)
+    if is_running; then echo "\$NAME already running"; exit 0; fi
+    rm -f "\$PIDFILE"
+    mkdir -p "\$(dirname "\$LOGFILE")"
+    chown "\$SERVICE_USER" "\$(dirname "\$LOGFILE")" 2>/dev/null || true
+    start-stop-daemon --start --background --make-pidfile --pidfile "\$PIDFILE" \
+      --chuid "\$SERVICE_USER" --chdir "\$SERVICE_HOME" --startas /bin/sh -- \
+      -c "exec env HOME=\"\$SERVICE_HOME\" \"\$DAEMON\" serve >>\"\$LOGFILE\" 2>&1"
+    sleep 1
+    is_running || { echo "\$NAME failed to start; see \$LOGFILE" >&2; exit 1; }
+    echo "\$NAME started"
+    ;;
+  stop)
+    if ! is_running; then rm -f "\$PIDFILE"; echo "\$NAME stopped"; exit 0; fi
+    start-stop-daemon --stop --retry TERM/10/KILL/5 --pidfile "\$PIDFILE" --remove-pidfile
+    echo "\$NAME stopped"
+    ;;
+  restart|reload)
+    "\$0" stop
+    "\$0" start
+    ;;
+  status)
+    if is_running; then echo "\$NAME is running (pid \$(cat "\$PIDFILE"))"; exit 0; fi
+    echo "\$NAME is not running" >&2
+    exit 3
+    ;;
+  *) echo "Usage: \$0 {start|stop|restart|reload|status}" >&2; exit 2 ;;
+esac
+EOF
+  ${SUDO:-} mkdir -p "$SYSV_INIT_DIR"
+  ${SUDO:-} cp "$SYSV_STAGE" "$SYSV_INIT"
+  ${SUDO:-} chmod 755 "$SYSV_INIT"
+  if command -v update-rc.d >/dev/null 2>&1 && [ "$SYSV_INIT_DIR" = /etc/init.d ]; then
+    ${SUDO:-} update-rc.d duckterm-hookd defaults >/dev/null
+  fi
+  ${SUDO:-} service duckterm-hookd restart
+  ${SUDO:-} service duckterm-hookd status
+  say "WSL SysV service registered + started (log: ~/.duckterm/hookd.log)"
+
+  # WSL1 does not execute Linux runlevels at Windows boot. A transparent
+  # per-user Windows Startup launcher starts the default distro's SysV service
+  # after login. Failure here does not invalidate the already-running service,
+  # but it is reported honestly so the operator can add the launcher manually.
+  if command -v cmd.exe >/dev/null 2>&1 && command -v wslpath >/dev/null 2>&1; then
+    APPDATA_WIN=$(cmd.exe /d /c "echo %APPDATA%" 2>/dev/null | tr -d '\r' | tail -1)
+    APPDATA_WSL=$(wslpath -u "$APPDATA_WIN" 2>/dev/null || true)
+    if [ -n "$APPDATA_WSL" ]; then
+      STARTUP_DIR="$APPDATA_WSL/Microsoft/Windows/Start Menu/Programs/Startup"
+      mkdir -p "$STARTUP_DIR"
+      printf '%s\r\n' '@echo off' 'C:\Windows\System32\wsl.exe -u root -- /etc/init.d/duckterm-hookd start >NUL 2>&1' \
+        > "$STARTUP_DIR/DuckTerm-Hookd.cmd"
+      say "Windows login autostart installed for the default WSL distro"
+    else
+      say "⚠ could not resolve the Windows Startup folder; the SysV service is running but must be started after Windows reboot"
+    fi
+  else
+    say "⚠ Windows interop unavailable; the SysV service is running but must be started after Windows reboot"
+  fi
+  exit 0
+fi
 
 if [ "$OS" = "darwin" ]; then
   PLIST="$HOME/Library/LaunchAgents/com.duckterm.hookd.plist"
