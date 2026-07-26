@@ -181,6 +181,7 @@ fi
 ${SUDO:-} cp "$tmp/$BIN_NAME" "$BIN_DIR/.$BIN_NAME.new"
 ${SUDO:-} chmod 755 "$BIN_DIR/.$BIN_NAME.new"
 ${SUDO:-} mv -f "$BIN_DIR/.$BIN_NAME.new" "$BIN_DIR/$BIN_NAME"
+${SUDO:-} ln -sfn "$BIN_NAME" "$BIN_DIR/dhook"
 BIN="$BIN_DIR/$BIN_NAME"
 if ! installed_version=$("$BIN" version 2>&1); then
   die "installed binary could not start on $OS-$ARCH (this host may require an unpacked/compatible release)"
@@ -225,7 +226,11 @@ fi
 "$BIN" install || say "⚠ hook install reported an issue — re-run '$BIN_NAME install' after fixing"
 
 # ---- supervisor ----------------------------------------------------------
-[ "${DUCKTERM_NO_SERVICE:-}" = "1" ] && { say "skipping service (DUCKTERM_NO_SERVICE=1). Run: $BIN_NAME serve"; exit 0; }
+[ "${DUCKTERM_NO_SERVICE:-}" = "1" ] && {
+  say "skipping service (DUCKTERM_NO_SERVICE=1). Run: $BIN_NAME serve"
+  say "then open the local control center: http://localhost:20080"
+  exit 0
+}
 if [ "$WSL_SYSV" = 1 ]; then
   if [ "$IS_ROOT" != 1 ] && [ -z "${SUDO:-}" ]; then
     die "WSL1 service installation requires root or passwordless sudo"
@@ -298,6 +303,7 @@ EOF
   ${SUDO:-} service duckterm-hookd restart
   ${SUDO:-} service duckterm-hookd status
   say "WSL SysV service registered + started (log: ~/.duckterm/hookd.log)"
+  say "local control center: http://localhost:20080"
 
   # WSL1 does not execute Linux runlevels at Windows boot. A transparent
   # per-user Windows Startup launcher starts the default distro's SysV service
@@ -331,6 +337,7 @@ if [ "$OS" = "darwin" ]; then
       || { launchctl unload "$PLIST" 2>/dev/null; launchctl load -w "$PLIST"; }
     say "launchd service restarted"
     say "─── done ───"
+    say "local control center: http://localhost:20080"
     say "verify from the DuckTerm app: Settings → Agent notifications → Verify"
     exit 0
   fi
@@ -400,4 +407,5 @@ User=$(id -un)" | ${SUDO:-} tee "$UNIT" >/dev/null
 fi
 
 say "─── done ───"
+say "local control center: http://localhost:20080"
 say "verify from the DuckTerm app: Settings → Agent notifications → Verify"
