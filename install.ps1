@@ -56,6 +56,74 @@ function Copy-HookdExecutable {
   }
 }
 
+function Stop-HookdTaskAndWait {
+  $scheduledTask = Get-ScheduledTask -TaskName 'DuckTerm Hookd' -ErrorAction SilentlyContinue
+  if ($null -eq $scheduledTask) {
+    return
+  }
+  $taskAction = (($scheduledTask.Actions | Select-Object -First 1).Execute).Trim('"')
+  $processIds = @(Get-CimInstance Win32_Process |
+    Where-Object { $_.ExecutablePath -eq $taskAction } |
+    ForEach-Object { [int]$_.ProcessId })
+  & schtasks.exe /End /TN 'DuckTerm Hookd' 2>$null | Out-Null
+
+  $deadline = [DateTime]::UtcNow.AddSeconds(15)
+  while ($true) {
+    $remaining = @($processIds | Where-Object { $null -ne (Get-Process -Id $_ -ErrorAction SilentlyContinue) })
+    if ($remaining.Count -eq 0) {
+      return
+    }
+    if ([DateTime]::UtcNow -ge $deadline) {
+      throw 'Timed out waiting for the previous DuckTerm Hookd worker to exit.'
+    }
+    Start-Sleep -Milliseconds 100
+  }
+}
+
+function Install-HookdRuntimePair {
+  param(
+    [Parameter(Mandatory = $true)][string]$StagedCli,
+    [Parameter(Mandatory = $true)][string]$StagedAgent,
+    [Parameter(Mandatory = $true)][string]$CliDestination,
+    [Parameter(Mandatory = $true)][string]$AgentDestination,
+    [Parameter(Mandatory = $true)][string]$ExpectedVersion
+  )
+
+  $cliBackup = "$CliDestination.rollback"
+  $agentBackup = "$AgentDestination.rollback"
+  Remove-Item -LiteralPath $cliBackup,$agentBackup -Force -ErrorAction SilentlyContinue
+  try {
+    if (Test-Path -LiteralPath $CliDestination) {
+      Move-Item -LiteralPath $CliDestination -Destination $cliBackup -Force
+    }
+    if (Test-Path -LiteralPath $AgentDestination) {
+      Move-Item -LiteralPath $AgentDestination -Destination $agentBackup -Force
+    }
+    Copy-HookdExecutable -Source $StagedCli -Destination $CliDestination
+    Copy-HookdExecutable -Source $StagedAgent -Destination $AgentDestination
+
+    $installedVersion = (& $CliDestination version 2>&1 | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $installedVersion -notmatch [Regex]::Escape($ExpectedVersion)) {
+      throw "Installed Hookd CLI did not report v$ExpectedVersion"
+    }
+    $installedAgentVersion = (& $AgentDestination version 2>&1 | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $installedAgentVersion -ne $installedVersion) {
+      throw "Installed Hookd background runtime does not match the CLI"
+    }
+    Remove-Item -LiteralPath $cliBackup,$agentBackup -Force -ErrorAction SilentlyContinue
+    return $installedVersion
+  } catch {
+    Remove-Item -LiteralPath $CliDestination,$AgentDestination -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $cliBackup) {
+      Move-Item -LiteralPath $cliBackup -Destination $CliDestination -Force
+    }
+    if (Test-Path -LiteralPath $agentBackup) {
+      Move-Item -LiteralPath $agentBackup -Destination $AgentDestination -Force
+    }
+    throw
+  }
+}
+
 $architecture = Resolve-HookdArchitecture
 $version = ([string](Invoke-RestMethod -UseBasicParsing -Uri $latestUrl)).Trim()
 if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
@@ -74,6 +142,7 @@ $localAppData = if ($env:LOCALAPPDATA) {
 }
 $installDirectory = Join-Path $localAppData 'Programs\duckterm-hookd'
 $executablePath = Join-Path $installDirectory 'duckterm-hookd.exe'
+$backgroundExecutablePath = Join-Path $installDirectory 'duckterm-hookd-agent.exe'
 $bundlePath = Join-Path $installDirectory 'duckterm-hookd-web.tar.gz'
 
 New-Item -ItemType Directory -Path $temporaryRoot -Force | Out-Null
@@ -97,13 +166,22 @@ try {
 
   Expand-Archive -LiteralPath $archivePath -DestinationPath $stagePath -Force
   $stagedExecutable = Join-Path $stagePath 'duckterm-hookd.exe'
+  $stagedBackgroundExecutable = Join-Path $stagePath 'duckterm-hookd-agent.exe'
   if (-not (Test-Path -LiteralPath $stagedExecutable -PathType Leaf)) {
     throw 'Windows release does not contain duckterm-hookd.exe'
   }
+  if (-not (Test-Path -LiteralPath $stagedBackgroundExecutable -PathType Leaf)) {
+    throw 'Windows release does not contain duckterm-hookd-agent.exe'
+  }
 
   New-Item -ItemType Directory -Path $installDirectory -Force | Out-Null
-  & schtasks.exe /End /TN 'DuckTerm Hookd' 2>$null | Out-Null
-  Copy-HookdExecutable -Source $stagedExecutable -Destination $executablePath
+  Stop-HookdTaskAndWait
+  $installedVersion = Install-HookdRuntimePair `
+    -StagedCli $stagedExecutable `
+    -StagedAgent $stagedBackgroundExecutable `
+    -CliDestination $executablePath `
+    -AgentDestination $backgroundExecutablePath `
+    -ExpectedVersion $version
 
   $stagedBundle = Join-Path $stagePath 'duckterm-hookd-web.tar.gz'
   if (Test-Path -LiteralPath $stagedBundle -PathType Leaf) {
@@ -115,11 +193,7 @@ try {
     }
   }
 
-  $installedVersion = (& $executablePath version 2>&1 | Out-String).Trim()
-  if ($LASTEXITCODE -ne 0 -or $installedVersion -notmatch [Regex]::Escape($version)) {
-    throw "Installed Hookd binary did not report v$version"
-  }
-  Write-HookdStep "installed $executablePath ($installedVersion)"
+  Write-HookdStep "installed runtime pair in $installDirectory ($installedVersion)"
   Write-HookdStep 'starting QR setup'
   & $executablePath setup --qr
   if ($LASTEXITCODE -ne 0) {

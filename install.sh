@@ -38,6 +38,7 @@ set -eu
 
 REPO="ducksee/duckterm-hookd-releases"
 BIN_NAME="duckterm-hookd"
+CONTROL_CENTER_URL="http://localhost:20080"
 
 say()  { printf '\033[1;36m[hookd]\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m[hookd]\033[0m %s\n' "$*" >&2; exit 1; }
@@ -222,13 +223,27 @@ else
   say "  (the service self-heals: it picks pairing up on its next retry, no restart needed)"
 fi
 
+# WSL1 shares the Windows host network, and modern WSL2 networking can mirror
+# localhost too. Allocate stable per-install ports once instead of letting
+# Windows and multiple distributions all contend for 11434 / 20080. Explicit
+# user values are preserved by the idempotent command.
+if [ "$IS_WSL" = "1" ]; then
+  WSL_PORT_OUTPUT=$("$BIN" config --ensure-wsl-ports) \
+    || die "could not allocate non-conflicting WSL LAN/Web ports"
+  say "$WSL_PORT_OUTPUT"
+  WSL_WEB_URL=$(printf '%s\n' "$WSL_PORT_OUTPUT" | sed -n 's/^WSL Web URL: //p' | tail -1)
+  [ -n "$WSL_WEB_URL" ] \
+    || die "WSL port allocator did not report the effective Web URL"
+  CONTROL_CENTER_URL=$WSL_WEB_URL
+fi
+
 # ---- wire agent hooks ----------------------------------------------------
 "$BIN" install || say "⚠ hook install reported an issue — re-run '$BIN_NAME install' after fixing"
 
 # ---- supervisor ----------------------------------------------------------
 [ "${DUCKTERM_NO_SERVICE:-}" = "1" ] && {
   say "skipping service (DUCKTERM_NO_SERVICE=1). Run: $BIN_NAME serve"
-  say "then open the local control center: http://localhost:20080"
+  say "then open the local control center: $CONTROL_CENTER_URL"
   exit 0
 }
 if [ "$WSL_SYSV" = 1 ]; then
@@ -303,7 +318,7 @@ EOF
   ${SUDO:-} service duckterm-hookd restart
   ${SUDO:-} service duckterm-hookd status
   say "WSL SysV service registered + started (log: ~/.duckterm/hookd.log)"
-  say "local control center: http://localhost:20080"
+  say "local control center: $CONTROL_CENTER_URL"
 
   # WSL1 does not execute Linux runlevels at Windows boot. A transparent
   # per-user Windows Startup launcher starts the default distro's SysV service
@@ -337,7 +352,7 @@ if [ "$OS" = "darwin" ]; then
       || { launchctl unload "$PLIST" 2>/dev/null; launchctl load -w "$PLIST"; }
     say "launchd service restarted"
     say "─── done ───"
-    say "local control center: http://localhost:20080"
+    say "local control center: $CONTROL_CENTER_URL"
     say "verify from the DuckTerm app: Settings → Agent notifications → Verify"
     exit 0
   fi
@@ -407,5 +422,5 @@ User=$(id -un)" | ${SUDO:-} tee "$UNIT" >/dev/null
 fi
 
 say "─── done ───"
-say "local control center: http://localhost:20080"
+say "local control center: $CONTROL_CENTER_URL"
 say "verify from the DuckTerm app: Settings → Agent notifications → Verify"
