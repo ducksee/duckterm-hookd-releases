@@ -13,7 +13,7 @@
 #   2. Installs to /usr/local/bin (sudo/root) or ~/.local/bin.
 #   3. Pairs once (QR by default; legacy token env remains compatible) —
 #      before the service starts, so the first connection is authenticated.
-#   4. `duckterm-hookd install` — wires agent hooks (append-only).
+#   4. `duckterm-hookd hook install` — wires agent hooks (marker-scoped).
 #   5. Registers a supervisor:
 #        macOS → launchd LaunchAgent (per-user)
 #        Linux → systemd system unit when root/sudo, else --user unit
@@ -202,8 +202,9 @@ case ":$PATH:" in *":$BIN_DIR:"*) ;; *) say "note: add $BIN_DIR to your PATH";; 
 
 # ---- bootstrap bundled Web UI -------------------------------------------
 # Release archives carry a verified compatibility snapshot so first use does
-# not depend on GitHub/DNS/proxy availability. Bootstrap never replaces a
-# valid existing UI; `duckterm-hookd ui upgrade` remains independently usable.
+# not depend on GitHub/DNS/proxy availability. Bootstrap advances an older UI
+# to the bundled compatible release without rolling back a newer independent
+# UI; `duckterm-hookd ui upgrade` remains independently usable.
 if [ "${DUCKTERM_NO_UI:-}" != "1" ] && [ -f "$tmp/duckterm-hookd-web.tar.gz" ]; then
   "$BIN" ui bootstrap "$tmp/duckterm-hookd-web.tar.gz" \
     || say "⚠ bundled Web UI install failed — Hookd will use its emergency page; retry with '$BIN_NAME ui upgrade'"
@@ -214,7 +215,7 @@ if [ "${DUCKTERM_PAIR_QR:-}" = "1" ]; then
   "$BIN" pair --qr
 elif [ -n "${DUCKTERM_PAIR_TOKEN:-}" ]; then
   "$BIN" pair --token "$DUCKTERM_PAIR_TOKEN" --user "$DUCKTERM_PAIR_USER"
-elif [ -f "$HOME/.duckterm/hookd-config.json" ]; then
+elif "$BIN" status --json 2>/dev/null | grep -Eq '"paired"[[:space:]]*:[[:space:]]*true'; then
   say "already paired — keeping existing ~/.duckterm/hookd-config.json"
 else
   say "not paired yet — choose ONE pairing method (do not run both):"
@@ -238,7 +239,7 @@ if [ "$IS_WSL" = "1" ]; then
 fi
 
 # ---- wire agent hooks ----------------------------------------------------
-"$BIN" install || say "⚠ hook install reported an issue — re-run '$BIN_NAME install' after fixing"
+"$BIN" hook install || say "⚠ hook install reported an issue — re-run '$BIN_NAME hook install' after fixing"
 
 # ---- supervisor ----------------------------------------------------------
 [ "${DUCKTERM_NO_SERVICE:-}" = "1" ] && {
