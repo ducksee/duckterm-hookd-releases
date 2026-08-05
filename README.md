@@ -9,11 +9,26 @@ archives include the Hookd binary and its bundled local Web UI.
 
 ## Install
 
-Install DuckTerm on your phone first. Each command below installs Hookd and
-shows one pairing QR code. In DuckTerm, open **Settings → Agent
-notifications → Pair by QR** and scan it.
+Install DuckTerm on your phone first. Each quick-start path below installs the
+Hookd runtime and bundled Web UI, registers its background service, connects
+detected coding agents, and shows one pairing QR code. In DuckTerm, open
+**Settings → Agent notifications → Pair by QR** and scan it.
 
 No pair token or account ID needs to be copied into your shell.
+
+### Command model
+
+The similarly named commands operate at different layers:
+
+- The Homebrew, PowerShell, and shell installers place the Hookd runtime and
+  bundled Web UI on the machine.
+- `duckterm-hookd setup --qr` is guided onboarding and repair: it pairs an
+  unpaired machine, reconciles detected agent integrations, starts the managed
+  service, and verifies readiness. It is safe to rerun and keeps an existing
+  pairing.
+- `duckterm-hookd hook install` changes only DuckTerm-owned coding-agent Hook
+  entries and wrappers. It does not install the Hookd runtime, pair the machine,
+  or manage the service.
 
 ### macOS — Homebrew
 
@@ -77,6 +92,13 @@ agent integrations.
 For end-to-end delivery, confirm the test message appears in DuckTerm. Cloud
 and APN/FCM delivery is asynchronous.
 
+If a supported coding agent is installed after initial setup, reconcile its
+integration without changing pairing or service state:
+
+```sh
+duckterm-hookd hook install
+```
+
 ## LAN Direct and firewalls
 
 Hookd listens on TCP 11434 on all interfaces for authenticated LAN/VPN direct
@@ -92,17 +114,17 @@ duckterm-hookd firewall status
 
 ## Upgrade
 
-Homebrew and native Windows:
+Every official Homebrew, Windows, Linux, and WSL installation can update
+through the same ownership-aware command:
 
 ```sh
-duckterm-hookd upgrade
+duckterm-hookd update
 ```
 
-Linux and WSL:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/ducksee/duckterm-hookd-releases/main/install.sh | sh
-```
+`duckterm-hookd upgrade` is an exact alias. Hookd detects whether the runtime
+is Homebrew-owned or an official native install, verifies the matching release,
+and restarts the same managed service. Re-running the one-line installer is
+only a recovery path for releases too old to provide the native updater.
 
 Upgrade only the independently versioned local Web UI:
 
@@ -112,14 +134,28 @@ duckterm-hookd ui upgrade
 
 ## Remove
 
-`duckterm-hookd uninstall` removes only DuckTerm-owned entries from supported
-agent configurations. It keeps the daemon, pairing, and third-party hooks.
-
-To remove the Homebrew service and package completely:
+Choose the scope explicitly:
 
 ```sh
-duckterm-hookd uninstall
-brew services stop duckterm-hookd
+# Remove only DuckTerm-owned agent Hooks and wrappers.
+duckterm-hookd hook uninstall
+
+# Stop Hookd and remove cloud/account pairing; keep Hooks, settings, and history.
+duckterm-hookd unpair --yes
+
+# Remove DuckTerm-owned Hooks, the managed service, and native runtime.
+# Local ~/.duckterm data is preserved.
+duckterm-hookd service uninstall --yes
+
+# Also delete all local Hookd data.
+duckterm-hookd service uninstall --purge --yes
+```
+
+`hook uninstall` and `service uninstall` preserve third-party agent Hooks.
+For a Homebrew-owned runtime, Homebrew still owns the package files; after the
+service cleanup, remove the formula separately:
+
+```sh
 brew uninstall duckterm-hookd
 ```
 
