@@ -288,7 +288,7 @@ case "\${1:-}" in
     chown "\$SERVICE_USER" "\$(dirname "\$LOGFILE")" 2>/dev/null || true
     start-stop-daemon --start --background --make-pidfile --pidfile "\$PIDFILE" \
       --chuid "\$SERVICE_USER" --chdir "\$SERVICE_HOME" --startas /bin/sh -- \
-      -c "exec env HOME=\"\$SERVICE_HOME\" \"\$DAEMON\" serve >>\"\$LOGFILE\" 2>&1"
+      -c "exec env HOME=\"\$SERVICE_HOME\" DUCKTERM_HOOKD_LOG_PATH=\"\$LOGFILE\" \"\$DAEMON\" serve >/dev/null 2>&1"
     sleep 1
     is_running || { echo "\$NAME failed to start; see \$LOGFILE" >&2; exit 1; }
     echo "\$NAME started"
@@ -347,10 +347,31 @@ if [ "$OS" = "darwin" ]; then
   PLIST="$HOME/Library/LaunchAgents/com.duckterm.hookd.plist"
   if [ -e "$PLIST" ]; then
     # Existing agent may carry site-specific args/env (deploy-host.sh adds
-    # --enable-web etc.). Keep it; this run is a binary upgrade + restart.
-    say "existing $PLIST found — keeping it (binary upgraded), restarting"
-    launchctl kickstart -k "gui/$(id -u)/com.duckterm.hookd" 2>/dev/null \
-      || { launchctl unload "$PLIST" 2>/dev/null; launchctl load -w "$PLIST"; }
+    # --enable-web etc.). Preserve those fields while transferring log-file
+    # ownership from launchd to Hookd's bounded rotating writer.
+    PLIST_STAGE="$PLIST.duckterm-log.$$"
+    cp "$PLIST" "$PLIST_STAGE"
+    /usr/libexec/PlistBuddy -c 'Add :EnvironmentVariables dict' "$PLIST_STAGE" 2>/dev/null || true
+    /usr/libexec/PlistBuddy -c 'Delete :EnvironmentVariables:DUCKTERM_HOOKD_LOG_PATH' "$PLIST_STAGE" 2>/dev/null || true
+    /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:DUCKTERM_HOOKD_LOG_PATH string $HOME/.duckterm/hookd.log" "$PLIST_STAGE" \
+      || { rm -f "$PLIST_STAGE"; die "could not configure bounded Hookd log path"; }
+    /usr/libexec/PlistBuddy -c 'Delete :StandardOutPath' "$PLIST_STAGE" 2>/dev/null || true
+    /usr/libexec/PlistBuddy -c 'Add :StandardOutPath string /dev/null' "$PLIST_STAGE" \
+      || { rm -f "$PLIST_STAGE"; die "could not detach launchd stdout log"; }
+    /usr/libexec/PlistBuddy -c 'Delete :StandardErrorPath' "$PLIST_STAGE" 2>/dev/null || true
+    /usr/libexec/PlistBuddy -c 'Add :StandardErrorPath string /dev/null' "$PLIST_STAGE" \
+      || { rm -f "$PLIST_STAGE"; die "could not detach launchd stderr log"; }
+    /usr/bin/plutil -lint "$PLIST_STAGE" >/dev/null \
+      || { rm -f "$PLIST_STAGE"; die "updated launchd service is invalid"; }
+    mv "$PLIST_STAGE" "$PLIST"
+    say "existing $PLIST found — preserved settings and enabled bounded logging, restarting"
+    # kickstart reuses launchd's already-loaded environment and would leave the
+    # old append-only descriptors active. Reload the definition transactionally.
+    launchctl bootout "gui/$(id -u)/com.duckterm.hookd" 2>/dev/null \
+      || launchctl unload "$PLIST" 2>/dev/null \
+      || true
+    launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null \
+      || launchctl load -w "$PLIST"
     say "launchd service restarted"
     say "─── done ───"
     say "local control center: $CONTROL_CENTER_URL"
@@ -368,8 +389,12 @@ if [ "$OS" = "darwin" ]; then
   <array><string>$BIN</string><string>serve</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>$HOME/.duckterm/hookd.log</string>
-  <key>StandardErrorPath</key><string>$HOME/.duckterm/hookd.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>DUCKTERM_HOOKD_LOG_PATH</key><string>$HOME/.duckterm/hookd.log</string>
+  </dict>
+  <key>StandardOutPath</key><string>/dev/null</string>
+  <key>StandardErrorPath</key><string>/dev/null</string>
 </dict>
 </plist>
 EOF
