@@ -238,6 +238,18 @@ if [ "$IS_WSL" = "1" ]; then
   CONTROL_CENTER_URL=$WSL_WEB_URL
 fi
 
+prepare_wsl_lan_firewall() {
+  [ "$IS_WSL" = "1" ] || return 0
+  if ${SUDO:-} "$BIN" firewall install; then
+    say "WSL LAN Direct firewall reconciled for the allocated port"
+    return 0
+  fi
+  say "⚠ WSL LAN Direct is listening, but its Windows inbound rule could not be installed"
+  say "  Open Windows Terminal as Administrator, enter this WSL distribution, then run:"
+  say "  $BIN firewall install"
+  return 0
+}
+
 # ---- wire agent hooks ----------------------------------------------------
 "$BIN" hook install || say "⚠ hook install reported an issue — re-run '$BIN_NAME hook install' after fixing"
 
@@ -318,6 +330,7 @@ EOF
   fi
   ${SUDO:-} service duckterm-hookd restart
   ${SUDO:-} service duckterm-hookd status
+  prepare_wsl_lan_firewall
   say "WSL SysV service registered + started (log: ~/.duckterm/hookd.log)"
   say "local control center: $CONTROL_CENTER_URL"
 
@@ -446,6 +459,8 @@ User=$(id -un)" | ${SUDO:-} tee "$UNIT" >/dev/null
     say "systemd user service enabled + started"
   fi
 fi
+
+prepare_wsl_lan_firewall
 
 say "─── done ───"
 say "local control center: $CONTROL_CENTER_URL"

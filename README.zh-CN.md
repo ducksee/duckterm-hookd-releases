@@ -51,8 +51,10 @@ Hookd。
                   │
                   ▼
             电脑上的 Hookd
-          ├── 同网时优先走已认证的 LAN Direct
-          ├── 离开局域网后由安全中继承接推送与交互
+          ├── 同网时走 LAN Direct
+          ├── 可建立直连时走 P2P
+          ├── 可选的自建 HTTPS/WSS Public Direct
+          ├── 最后回退到安全中继
           └── 本机 Web 控制中心
                   │
                   ▼
@@ -138,7 +140,17 @@ curl -fsSL https://raw.githubusercontent.com/ducksee/duckterm-hookd-releases/mai
 
 原生 Windows 与 WSL 会被视为两台主机。WSL 安装拥有独立的主机身份、端口、
 Agent 集成与服务；有 systemd 时优先使用 systemd，WSL1 则使用可跨 Windows
-登录持续运行的受管理兼容服务。
+登录持续运行的受管理兼容服务。安装器还会按 WSL 实际分配的 LAN Direct 端口协调
+Windows 入站规则；若 Windows UAC/权限阻止这个 best-effort 步骤，请用“管理员身份”
+打开 Windows Terminal、进入该 WSL distribution 后运行：
+
+```sh
+duckterm-hookd firewall install
+duckterm-hookd firewall status
+```
+
+Linux `sudo` 与 Windows 管理员 token 是两套权限；只在 WSL 内 `sudo` 不能替代
+Windows 侧提权。
 
 ## 验证连接
 
@@ -168,22 +180,64 @@ duckterm-hookd hook install
 | `duckterm-hookd update` | 校验并安装最新版本，保留当前服务归属与配置 |
 | `duckterm-hookd ui upgrade` | 只更新独立发版的本地 Web UI |
 | `duckterm-hookd firewall status` | 检查 LAN Direct 监听与防火墙状态 |
+| `duckterm-hookd access list` | 检查可选的 Public Direct 监听与公网 origin |
 
 `upgrade` 与 `update` 完全等价。
 
-## 同网优先，离网可用
+## 直连优先，中继兜底
 
-手机能够访问电脑时，Hookd 会优先使用经过认证的 LAN Direct；离开这个网络后，
-长连接仍可承接通知、授权与回复。本地 Web 控制中心默认只允许本机访问，只有你
-显式开启后才会进入局域网模式。
+DuckTerm 每次只选择一条数据通道，优先级是：
+
+```text
+LAN Direct -> P2P -> Public Direct -> 安全中继
+```
+
+- **LAN Direct**：手机和电脑处于同一可信局域网或私有 overlay 时，
+  通常是最快、最简单的路径。
+- **P2P**：LAN 不可用时尝试已认证的点对点连接；成功时仍高于
+  用户配置的公网入口。
+- **Public Direct**：用户自己运维的可选 HTTPS/WSS origin，通过反向代理
+  或隧道直接到 Hookd。大数据不经 Pushd，但 Pushd 仍负责身份、端点发现、
+  通知与降级。
+- **安全中继**：前面的直连都不可用时才使用，保证离网后仍能工作。
+
+三条直连路径按顺序尝试，并共享一个有界的建连预算，不会长期同时维持
+四份重复数据流。Public Direct 可能先临时接通；若剩余预算内 P2P 成功，
+则会自动升级到优先级更高的 P2P。
+
+### 添加自定义 Public Direct 公网地址
+
+先把一个支持 HTTPS/WSS 的反向代理或隧道指向 Hookd 专用的本机入口
+`http://127.0.0.1:11435`，并保留完整请求路径与 WebSocket upgrade。然后只添加
+对外 HTTPS origin：
+
+```sh
+duckterm-hookd access add https://hookd.example.com
+duckterm-hookd restart
+duckterm-hookd access list
+```
+
+`access add` 会自动开启 Public Direct，并在尚未配置时创建私密路由前缀。
+Hookd 通过已认证的云连接把短租期端点发布给已配对设备。最多可配置 8 个
+有序 HTTPS origin；HTTP、用户名/密码、path、query 和 fragment 都会被拒绝。
+Cloudflare Tunnel、ngrok、frp/rathole、Tailscale Funnel、SSH reverse tunnel，
+以及普通的 Nginx/Caddy/Traefik 公网主机都可以作为传输适配层，前提是保留
+HTTPS/WSS 语义。
+
+Public Direct 不是路由器端口转发。只应让 TLS 代理访问专用的 loopback 入口；
+不得公开 LAN 端口 `11434`，也不得公开 Web 控制中心 `20080`。隐藏前缀只是
+扫描隔离，真正的会话仍要通过 DuckTerm HMAC/capability 认证。如果 TLS 供应商
+终止了加密，它可以看到被代理的数据面，因此请使用你愿意信任的入口。
+
+本地 Web 控制中心默认仍只允许本机访问；如需在可信局域网中打开，必须显式配置：
 
 ```sh
 duckterm-hookd config --lan --reload    # 仅用于可信局域网或 VPN
 duckterm-hookd config --local --reload  # 恢复为仅本机访问
 ```
 
-LAN Direct 默认使用 TCP `11434`。不要通过公网路由器转发这个端口或 Web 控制
-中心端口。在 Windows 或启用了严格防火墙的 Linux 上，先查看精确规则与监听结果：
+LAN Direct 默认使用 TCP `11434`。在 Windows 或启用了严格防火墙的 Linux 上，
+先查看精确规则与监听结果：
 
 ```sh
 duckterm-hookd firewall status

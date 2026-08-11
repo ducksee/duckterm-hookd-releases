@@ -53,8 +53,10 @@ Coding agents + tmux / psmux / Herdr
                   │
                   ▼
         Hookd on your computer
-          ├── authenticated LAN Direct when reachable
-          ├── secure relay for push and remote delivery
+          ├── LAN Direct on the same network
+          ├── P2P when a direct peer path is available
+          ├── optional Public Direct through your HTTPS/WSS endpoint
+          ├── secure relay as the final fallback
           └── local Web control center
                   │
                   ▼
@@ -145,7 +147,18 @@ curl -fsSL https://raw.githubusercontent.com/ducksee/duckterm-hookd-releases/mai
 
 Native Windows and WSL are separate hosts. A WSL install gets its own identity,
 ports, agent integrations, and service. systemd is used when available; WSL1
-uses a managed fallback that survives Windows sign-in.
+uses a managed fallback that survives Windows sign-in. The installer also
+reconciles the Windows inbound rule for the actual WSL LAN Direct port. If UAC
+prevents that best-effort step, open Windows Terminal as Administrator, enter
+the distribution, and run:
+
+```sh
+duckterm-hookd firewall install
+duckterm-hookd firewall status
+```
+
+Linux `sudo` and the Windows administrator token are separate authorities;
+Linux elevation alone cannot modify Windows Firewall.
 
 ## Verify the connection
 
@@ -177,24 +190,70 @@ duckterm-hookd hook install
 | `duckterm-hookd update` | verify and install the latest release, preserving the current owner and configuration |
 | `duckterm-hookd ui upgrade` | update only the independently versioned local Web UI |
 | `duckterm-hookd firewall status` | inspect LAN Direct listener and firewall readiness |
+| `duckterm-hookd access list` | inspect the opt-in Public Direct listener and configured public origins |
 
 `upgrade` is an exact alias of `update`.
 
-## Local first, remote when needed
+## Direct first, relay when needed
 
-Hookd prefers authenticated LAN Direct when the phone can reach the computer.
-Away from that network, the persistent secure connection keeps notifications,
-approvals, and replies available. The Web control center stays local-only unless
-you explicitly enable LAN access.
+DuckTerm selects one data path at a time in this order:
+
+```text
+LAN Direct -> P2P -> Public Direct -> secure relay
+```
+
+- **LAN Direct** is the fastest and simplest path when the phone can reach the
+  computer on the same trusted network or private overlay.
+- **P2P** tries an authenticated peer connection when LAN is unavailable. It is
+  still preferred over an operator-provided public endpoint.
+- **Public Direct** is an optional HTTPS/WSS origin that you operate through a
+  reverse proxy or tunnel. It carries the data plane directly to Hookd; Pushd
+  still supplies identity, endpoint discovery, notifications, and fallback.
+- **Relay** is the last resort, so remote use remains available when every
+  direct path is unavailable.
+
+The direct attempts are sequential and share one bounded connection budget;
+DuckTerm does not keep four duplicate streams open. A Public Direct connection
+may serve provisionally while P2P finishes, then yield if the higher-priority
+P2P path succeeds.
+
+### Add a custom Public Direct endpoint
+
+Point an HTTPS/WSS reverse proxy or tunnel at Hookd's dedicated loopback
+ingress, `http://127.0.0.1:11435`, preserving the request path and WebSocket
+upgrade. Then register only its HTTPS origin:
+
+```sh
+duckterm-hookd access add https://hookd.example.com
+duckterm-hookd restart
+duckterm-hookd access list
+```
+
+`access add` enables Public Direct and creates a private route prefix when one
+does not already exist. Hookd publishes the resulting short-lived endpoint to
+paired devices over its authenticated cloud connection. Up to eight ordered
+HTTPS origins can be configured; HTTP origins, credentials, paths, queries,
+and fragments are rejected. Cloudflare Tunnel, ngrok, frp/rathole, Tailscale
+Funnel, SSH reverse tunnels, and a normal Nginx/Caddy/Traefik host are all
+valid transport adapters when they preserve HTTPS/WSS semantics.
+
+Public Direct is not router port forwarding. Expose only the dedicated
+loopback ingress through your TLS proxy. Never publish LAN port `11434` or the
+Web control center on `20080`. The hidden route prefix limits scanning; the
+actual session still requires DuckTerm's HMAC/capability authentication. A TLS
+provider that terminates encryption can observe the proxied data plane, so use
+an endpoint whose trust model you accept.
+
+The Web control center remains local-only unless you explicitly enable LAN
+access:
 
 ```sh
 duckterm-hookd config --lan --reload    # trusted LAN / VPN only
 duckterm-hookd config --local --reload  # restore localhost-only Web access
 ```
 
-LAN Direct uses TCP `11434` by default. Do not expose it or the Web control
-center through public router port forwarding. On Windows or a restrictive
-Linux firewall, inspect the exact rule and listener before changing anything:
+LAN Direct uses TCP `11434` by default. On Windows or a restrictive Linux
+firewall, inspect the exact rule and listener before changing anything:
 
 ```sh
 duckterm-hookd firewall status
