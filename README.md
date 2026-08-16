@@ -244,6 +244,21 @@ actual session still requires DuckTerm's HMAC/capability authentication. A TLS
 provider that terminates encryption can observe the proxied data plane, so use
 an endpoint whose trust model you accept.
 
+Ports `11434` and `11435` are both Hookd data-plane listeners, not management
+ports. `11434` is LAN Direct and remains protected by its trusted local-address
+gate; the opt-in `11435` listener is Public Direct's loopback-only proxy
+boundary with a separate route and authentication domain. Port `20080` is the
+local Web management plane.
+
+DuckTerm validates a Public Direct certificate through the mobile operating
+system. An expired, untrusted, or wrong-host certificate makes that Public
+candidate fail and DuckTerm falls back to another direct origin or the secure
+relay. There is no supported global “ignore SSL” switch: self-hosted endpoints
+should automate ACME renewal, while private PKI must establish platform trust
+instead of disabling verification. Any future expiry grace mode would require
+a per-origin pinned certificate key and a short hard deadline; an unpinned
+trust-all mode is outside the supported design.
+
 The Web control center remains local-only unless you explicitly enable LAN
 access:
 
