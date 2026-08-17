@@ -123,15 +123,23 @@ say "platform: $OS-$ARCH"
 IS_WSL=0
 if [ "$OS" = "linux" ] && is_wsl; then IS_WSL=1; fi
 WSL_SYSV=0
+FOREGROUND_MODE=0
 # WSL1 cannot run systemd. Use Ubuntu's SysV/start-stop-daemon backend and a
 # Windows-login launcher instead; WSL2 with systemd continues down the normal
 # systemd path.
+# Containers / no-init Linux (PID 1 = tini, sh, docker-init, …): while systemd
+# is absent, a systemd unit could never be started by anyone. Foreground is
+# the first-class service kind there (mirrors duckterm-web's installer): the
+# container's own supervisor owns boot persistence, and we hand it a generated
+# run script instead of failing the install. DUCKTERM_NO_SERVICE=1 keeps its
+# existing meaning (install bytes only, no guidance, no run script).
 if [ "$OS" = "linux" ] && [ "${DUCKTERM_NO_SERVICE:-}" != "1" ] && ! systemd_is_pid1; then
   if [ "$IS_WSL" = 1 ]; then
     WSL_SYSV=1
     say "WSL without systemd detected — installing a managed SysV service"
   else
-  die "systemd is not running. Set DUCKTERM_NO_SERVICE=1 for a foreground install, or install Hookd under this host's service manager"
+    FOREGROUND_MODE=1
+    say "no init supervisor (PID 1 is $(cat /proc/1/comm 2>/dev/null || echo unknown)) — foreground mode; boot persistence is delegated to your container supervisor"
   fi
 fi
 
@@ -259,6 +267,26 @@ prepare_wsl_lan_firewall() {
   say "then open the local control center: $CONTROL_CENTER_URL"
   exit 0
 }
+if [ "$FOREGROUND_MODE" = 1 ]; then
+  RUN_SH="$HOME/.duckterm/run-hookd.sh"
+  RUN_DIR=$(dirname "$RUN_SH")
+  mkdir -p "$RUN_DIR"
+  {
+    printf '#!/bin/sh\n'
+    printf '# duckterm-hookd entry for hosts without an init supervisor (containers).\n'
+    printf '# Wire this into the container supervisor for boot persistence, e.g.\n'
+    printf '#   docker CMD / compose command: ["%s"]\n' "$RUN_SH"
+    printf '#   ad hoc: setsid nohup %s >>%s/hookd.log 2>&1 &\n' "$RUN_SH" "$RUN_DIR"
+    printf 'exec "%s" serve\n' "$BIN"
+  } > "$RUN_SH"
+  chmod 0755 "$RUN_SH"
+  say "foreground entry written: $RUN_SH"
+  say "PID 1 is $(cat /proc/1/comm 2>/dev/null || echo unknown), not systemd: boot persistence is delegated to your container supervisor"
+  say "start now: setsid nohup $RUN_SH >>$RUN_DIR/hookd.log 2>&1 &"
+  say "persist:   point the container supervisor (docker CMD / compose / s6) at $RUN_SH"
+  say "then open the local control center: $CONTROL_CENTER_URL"
+  exit 0
+fi
 if [ "$WSL_SYSV" = 1 ]; then
   if [ "$IS_ROOT" != 1 ] && [ -z "${SUDO:-}" ]; then
     die "WSL1 service installation requires root or passwordless sudo"
