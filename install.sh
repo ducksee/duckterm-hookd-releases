@@ -219,12 +219,16 @@ if [ "${DUCKTERM_NO_UI:-}" != "1" ] && [ -f "$tmp/duckterm-hookd-web.tar.gz" ]; 
 fi
 
 # ---- pair (before the service starts — first connect is authenticated) ---
-if [ "${DUCKTERM_PAIR_QR:-}" = "1" ]; then
+if "$BIN" status --json 2>/dev/null | grep -Eq '"paired"[[:space:]]*:[[:space:]]*true'; then
+  if [ "${DUCKTERM_PAIR_QR:-}" = "1" ] || [ -n "${DUCKTERM_PAIR_TOKEN:-}" ]; then
+    say "already paired — keeping existing ~/.duckterm/hookd-config.json (pairing flags ignored; to re-pair: duckterm-hookd unpair, or pair --force)"
+  else
+    say "already paired — keeping existing ~/.duckterm/hookd-config.json"
+  fi
+elif [ "${DUCKTERM_PAIR_QR:-}" = "1" ]; then
   "$BIN" pair --qr
 elif [ -n "${DUCKTERM_PAIR_TOKEN:-}" ]; then
   "$BIN" pair --token "$DUCKTERM_PAIR_TOKEN" --user "$DUCKTERM_PAIR_USER"
-elif "$BIN" status --json 2>/dev/null | grep -Eq '"paired"[[:space:]]*:[[:space:]]*true'; then
-  say "already paired — keeping existing ~/.duckterm/hookd-config.json"
 else
   say "not paired yet — choose ONE pairing method (do not run both):"
   say "  $BIN_NAME pair --qr                                      (scan once in the DuckTerm app)"
