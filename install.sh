@@ -460,6 +460,7 @@ ExecStart=$BIN serve
 Restart=always
 RestartSec=5
 Environment=HOME=$HOME
+Environment=DUCKTERM_HOOKD_LOG_PATH=$HOME/.duckterm/hookd.log
 
 [Install]
 WantedBy=default.target"
@@ -471,6 +472,48 @@ WantedBy=default.target"
       # writes env like DUCKTERM_LIVETAIL_*, --enable-web). Never downgrade
       # it — treat this run as a binary upgrade and just restart.
       say "existing $UNIT found — keeping it (binary upgraded), restarting"
+      # …with one additive exception. Units written before the log path was
+      # part of the template send every line to journald unbounded, which on
+      # a server with no herdr/agents was measured at ~73% of all system log
+      # volume. Backfill ONLY when the key is absent, append-only inside
+      # [Service], and say so. Anything else about the unit stays untouched.
+      if ! grep -q 'DUCKTERM_HOOKD_LOG_PATH' "$UNIT" 2>/dev/null; then
+        # The path must belong to the identity the UNIT runs as, never to
+        # whoever ran the installer. Under `sudo install.sh` on a host whose
+        # unit carries `User=someone` (deploy-host.sh writes that), the
+        # installer's $HOME is root's; writing it here would leave the service
+        # unable to open the file, the daemon would fall back to stderr — back
+        # into unbounded journald — and we would have printed "added bounded
+        # log path" over a no-op. Both writers of this unit set
+        # Environment=HOME=, so read it; fall back to the passwd home of
+        # User=; refuse to guess.
+        UNIT_HOME="$(sed -n 's/^Environment=HOME=\(.*\)$/\1/p' "$UNIT" 2>/dev/null | head -1)"
+        if [ -z "$UNIT_HOME" ]; then
+          UNIT_USER="$(sed -n 's/^User=\(.*\)$/\1/p' "$UNIT" 2>/dev/null | head -1)"
+          [ -n "$UNIT_USER" ] && UNIT_HOME="$(getent passwd "$UNIT_USER" 2>/dev/null | cut -d: -f6)"
+        fi
+        if [ -z "$UNIT_HOME" ]; then
+          say "⚠ $UNIT declares no HOME or User — add Environment=DUCKTERM_HOOKD_LOG_PATH=<service-home>/.duckterm/hookd.log under [Service] by hand to bound the log"
+        else
+          # Build the edited unit in a temp file and copy it over: never edit a
+          # system unit in place. `cp` onto the existing path keeps its owner
+          # and mode (a temp file's would not). Verify the key landed before we
+          # claim success — a silent no-op here would look exactly like a fix.
+          UNIT_TMP="$(mktemp 2>/dev/null || echo "")"
+          if [ -n "$UNIT_TMP" ] \
+            && awk -v line="Environment=DUCKTERM_HOOKD_LOG_PATH=$UNIT_HOME/.duckterm/hookd.log" '
+                 { print }
+                 /^\[Service\]/ && !added { print line; added = 1 }
+               ' "$UNIT" > "$UNIT_TMP" 2>/dev/null \
+            && grep -q 'DUCKTERM_HOOKD_LOG_PATH' "$UNIT_TMP" \
+            && ${SUDO:-} cp "$UNIT_TMP" "$UNIT" 2>/dev/null; then
+            say "added bounded log path to $UNIT under $UNIT_HOME (was journald-unbounded)"
+          else
+            say "⚠ could not add DUCKTERM_HOOKD_LOG_PATH to $UNIT — add it under [Service] by hand to bound the log"
+          fi
+          [ -n "$UNIT_TMP" ] && rm -f "$UNIT_TMP"
+        fi
+      fi
       ${SUDO:-} systemctl daemon-reload
       ${SUDO:-} systemctl restart duckterm-hookd
     else
