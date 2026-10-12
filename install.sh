@@ -94,6 +94,162 @@ systemd_is_pid1() {
     && command -v systemctl >/dev/null 2>&1
 }
 
+# >>> self-update whitelist backfill (docs/diagnostics/2026-10-12-hookd-install-sh-unit-whitelist-gap.md)
+# Units written by deploy-host.sh before 2026-08-17 run hookd under
+# ProtectSystem=full WITHOUT write access to the executable's directory, so
+# every self-update (which stages its new binary next to the running one)
+# dies with EROFS; this installer kept such units as they were, so those
+# hosts needed a manual upgrade every release. This adds the one narrow
+# exception the current deploy-host.sh template carries — write access to
+# that single directory (both directive spellings: systemd < 231 only knows
+# ReadWriteDirectories=) — and nothing else. It does not override a
+# genuinely read-only filesystem, ownership, or any other mount policy.
+#
+# Only the canonical forms our two unit writers emit are handled. Anything
+# else — other sections aside — is REFUSED (unit left byte-identical, with a
+# reason): non-canonical/indented/continued lines, repeated ProtectSystem or
+# ExecStart, list resets or -/+ prefixed entries, other mount-policy
+# directives, a drop-in touching any of them, an ExecStart that is not one
+# absolute, direct, symlink-free duckterm-hookd path, or a service binary
+# that is not the one this installer just installed.
+#
+# unit_whitelist_backfill UNIT INSTALLED_BIN [DROPIN...]
+# stdout: one line "changed: …" | "unchanged: …" | "refused: …" | "failed: …"
+# status: 0 changed/unchanged, 2 refused, 1 failed. Only "changed" alters
+# UNIT: staged beside it (owner/mode copied), verified, backed up to
+# UNIT.hookd-whitelist.bak, then renamed over it.
+# UWB_ROOT (tests only) prefixes every filesystem lookup of unit paths.
+unit_whitelist_backfill() {
+  uwb_unit=$1; uwb_bin=$2; shift 2
+  uwb_root=${UWB_ROOT:-}
+  if [ -L "$uwb_unit" ] || [ ! -f "$uwb_unit" ]; then
+    echo "refused: $uwb_unit is not a regular file"; return 2
+  fi
+  if ! uwb_svc=$(awk '/^\[/ { s = ($0 == "[Service]"); next } s' "$uwb_unit"); then
+    echo "failed: cannot read $uwb_unit"; return 1
+  fi
+  uwb_rel='ProtectSystem|ExecStart|ReadWritePaths|ReadWriteDirectories|ReadOnlyPaths|ReadOnlyDirectories|InaccessiblePaths|InaccessibleDirectories|TemporaryFileSystem|BindPaths|BindReadOnlyPaths|RootDirectory|RootImage|PrivateMounts'
+  if printf '%s\n' "$uwb_svc" | grep -Eq "^[[:space:]]+($uwb_rel)|^($uwb_rel)[[:space:]]+=|\\\\[[:space:]]*\$"; then
+    echo "refused: non-canonical sandbox or ExecStart lines in [Service]"; return 2
+  fi
+  if printf '%s\n' "$uwb_svc" | grep -Eq '^(ReadOnlyPaths|ReadOnlyDirectories|InaccessiblePaths|InaccessibleDirectories|TemporaryFileSystem|BindPaths|BindReadOnlyPaths|RootDirectory|RootImage|PrivateMounts)='; then
+    echo "refused: [Service] carries other mount policy; fix the unit by hand"; return 2
+  fi
+  for uwb_d in "$@"; do
+    [ -n "$uwb_d" ] || continue
+    if [ ! -r "$uwb_d" ]; then echo "refused: drop-in $uwb_d is not readable"; return 2; fi
+    if grep -Eq "^[[:space:]]*($uwb_rel)[[:space:]]*=" "$uwb_d"; then
+      echo "refused: drop-in $uwb_d sets sandbox or ExecStart directives"; return 2
+    fi
+  done
+
+  # Count assignment LINES (empty ones included — an empty assignment
+  # resets earlier ones) across every [Service] section before reading any
+  # value: repeats and resets are refused, never reconstructed.
+  case $(printf '%s\n' "$uwb_svc" | grep -c '^ProtectSystem=') in
+    0) echo "unchanged: no ProtectSystem"; return 0 ;;
+    1) ;;
+    *) echo "refused: ProtectSystem is assigned more than once (or reset)"; return 2 ;;
+  esac
+  uwb_ps=$(printf '%s\n' "$uwb_svc" | sed -n 's/^ProtectSystem=//p')
+  case $uwb_ps in
+    no|false) echo "unchanged: ProtectSystem=$uwb_ps"; return 0 ;;
+    full|yes|true|strict) ;;
+    *) echo "refused: unsupported ProtectSystem='$uwb_ps'"; return 2 ;;
+  esac
+
+  if [ "$(printf '%s\n' "$uwb_svc" | grep -c '^ExecStart=')" != 1 ]; then
+    echo "refused: expected exactly one ExecStart assignment (repeats and resets are not supported)"; return 2
+  fi
+  uwb_es=$(printf '%s\n' "$uwb_svc" | sed -n 's/^ExecStart=//p')
+  if [ -z "$uwb_es" ]; then echo "refused: empty ExecStart"; return 2; fi
+  case $uwb_es in
+    *%*|*\"*|*\'*|*\\*) echo "refused: ExecStart uses specifiers, quoting or escapes"; return 2 ;;
+  esac
+  uwb_exe=${uwb_es%% *}
+  case $uwb_exe in
+    /*) ;;
+    *) echo "refused: ExecStart is not a direct absolute path ($uwb_exe)"; return 2 ;;
+  esac
+  case $uwb_exe in
+    *[!A-Za-z0-9._/-]*|*//*|*/./*|*/../*) echo "refused: unsupported ExecStart path ($uwb_exe)"; return 2 ;;
+    */duckterm-hookd) ;;
+    *) echo "refused: ExecStart does not run duckterm-hookd directly ($uwb_exe)"; return 2 ;;
+  esac
+  if [ -L "$uwb_root$uwb_exe" ] || [ ! -f "$uwb_root$uwb_exe" ] \
+     || ! uwb_real=$(readlink -f "$uwb_root$uwb_exe" 2>/dev/null) || [ "$uwb_real" != "$uwb_root$uwb_exe" ]; then
+    echo "refused: $uwb_exe is missing or a symlink; the updater would stage next to its real target"; return 2
+  fi
+  if ! uwb_binreal=$(readlink -f "$uwb_bin" 2>/dev/null) || [ "$uwb_binreal" != "$uwb_root$uwb_exe" ]; then
+    echo "refused: the service runs $uwb_exe but this installer installed $uwb_bin"; return 2
+  fi
+  uwb_dir=${uwb_exe%/*}
+  case $uwb_dir in
+    # A protected ROOT would whitelist its whole subtree; only an ordinary
+    # child directory (e.g. /usr/local/bin) is supported.
+    ''|/usr|/etc|/boot|/dev|/dev/*|/proc|/proc/*|/sys|/sys/*|/run|/run/*) echo "refused: unsupported install directory '${uwb_dir:-/}'"; return 2 ;;
+  esac
+  case $uwb_ps in
+    strict) ;;
+    full) case $uwb_dir in /usr|/usr/*|/boot|/boot/*|/etc|/etc/*) ;; *) echo "unchanged: $uwb_dir is writable under ProtectSystem=full"; return 0 ;; esac ;;
+    *) case $uwb_dir in /usr|/usr/*|/boot|/boot/*) ;; *) echo "unchanged: $uwb_dir is writable under ProtectSystem=$uwb_ps"; return 0 ;; esac ;;
+  esac
+
+  uwb_lists=$(printf '%s\n' "$uwb_svc" | grep -E '^(ReadWritePaths|ReadWriteDirectories)=' || true)
+  if printf '%s\n' "$uwb_lists" | grep -Eq '^(ReadWritePaths|ReadWriteDirectories)=[[:space:]]*$'; then
+    echo "refused: a ReadWrite list is reset (empty assignment)"; return 2
+  fi
+  if printf '%s\n' "$uwb_lists" | sed 's/^[^=]*=//' | tr ' \t' '\n\n' | grep -Eq '^[-+]'; then
+    echo "refused: prefixed (-/+) ReadWrite entries"; return 2
+  fi
+  uwb_add=""
+  for uwb_k in ReadWritePaths ReadWriteDirectories; do
+    if ! printf '%s\n' "$uwb_lists" | sed -n "s/^$uwb_k=//p" | tr ' \t' '\n\n' | grep -Fxq -- "$uwb_dir"; then
+      uwb_add="$uwb_add${uwb_add:+
+}$uwb_k=$uwb_dir"
+    fi
+  done
+  if [ -z "$uwb_add" ]; then echo "unchanged: $uwb_dir is already whitelisted"; return 0; fi
+
+  # Stage → verify → back up → rename. The original stays byte-identical on
+  # any failure before the rename.
+  uwb_stage="${uwb_unit%/*}/.${uwb_unit##*/}.hookd-whitelist.$$"
+  uwb_bak="$uwb_unit.hookd-whitelist.bak"
+  if ! uwb_tmp=$(mktemp 2>/dev/null); then echo "failed: mktemp"; return 1; fi
+  # Lines travel through ENVIRON: some awks reject a newline in -v values.
+  if ! UWB_ADD=$uwb_add awk '
+         { print }
+         /^\[/ { s = ($0 == "[Service]"); next }
+         s && /^ProtectSystem=/ && !done { print ENVIRON["UWB_ADD"]; done = 1 }
+       ' "$uwb_unit" > "$uwb_tmp" \
+     || ! UWB_ADD=$uwb_add awk '
+         # Verify: dropping exactly the inserted lines, in order, right after
+         # [Service]'"'"'s ProtectSystem= line must give the original back.
+         BEGIN { n = split(ENVIRON["UWB_ADD"], a, "\n") }
+         k > 0 { if ($0 == a[n - k + 1]) { k--; next } k = 0 }
+         { print }
+         /^\[/ { s = ($0 == "[Service]"); next }
+         s && /^ProtectSystem=/ && !done { k = n; done = 1 }
+       ' "$uwb_tmp" | cmp -s - "$uwb_unit"; then
+    rm -f "$uwb_tmp"; echo "failed: could not prepare the patched unit"; return 1
+  fi
+  if ! ${SUDO:-} cp -p "$uwb_unit" "$uwb_stage" \
+     || ! ${SUDO:-} sh -c 'cat "$1" > "$2"' sh "$uwb_tmp" "$uwb_stage" \
+     || ! ${SUDO:-} cmp -s "$uwb_tmp" "$uwb_stage" \
+     || ! ${SUDO:-} cp -p "$uwb_unit" "$uwb_bak" \
+     || ! ${SUDO:-} mv -f "$uwb_stage" "$uwb_unit"; then
+    ${SUDO:-} rm -f "$uwb_stage"; rm -f "$uwb_tmp"
+    echo "failed: could not write $uwb_unit (left unchanged)"; return 1
+  fi
+  if ! ${SUDO:-} cmp -s "$uwb_tmp" "$uwb_unit"; then
+    rm -f "$uwb_tmp"; echo "failed: $uwb_unit does not hold the patched content (backup: $uwb_bak)"; return 1
+  fi
+  rm -f "$uwb_tmp"
+  echo "changed: added $(printf '%s\n' "$uwb_add" | tr '\n' ' ')to $uwb_unit (backup: $uwb_bak)"
+  return 0
+}
+# <<< self-update whitelist backfill
+
 # A partial pair request used to write an anonymous config and tell the user
 # to pair a second time with --user. Fail before downloading or installing
 # anything instead: the App always supplies both values in one paste.
@@ -514,6 +670,23 @@ WantedBy=default.target"
           [ -n "$UNIT_TMP" ] && rm -f "$UNIT_TMP"
         fi
       fi
+      # …and the self-update whitelist (see unit_whitelist_backfill). Drop-ins
+      # from systemd itself plus the standard directories, so an override
+      # cannot be missed when `systemctl show` is unavailable.
+      UWB_DROPINS="$(systemctl show -p DropInPaths --value duckterm-hookd 2>/dev/null || true)"
+      for d in /etc/systemd/system/duckterm-hookd.service.d/*.conf \
+               /run/systemd/system/duckterm-hookd.service.d/*.conf \
+               /usr/lib/systemd/system/duckterm-hookd.service.d/*.conf \
+               /lib/systemd/system/duckterm-hookd.service.d/*.conf; do
+        [ -e "$d" ] && UWB_DROPINS="$UWB_DROPINS $d"
+      done
+      UWB_RC=0
+      # shellcheck disable=SC2086 # drop-in paths are space-separated by systemd
+      UWB_OUT="$(unit_whitelist_backfill "$UNIT" "$BIN" $UWB_DROPINS)" || UWB_RC=$?
+      case $UWB_RC in
+        0) say "self-update whitelist: $UWB_OUT" ;;
+        *) say "⚠ self-update whitelist: $UWB_OUT — in-service self-update may keep failing (install_readonly) until $UNIT is fixed by hand" ;;
+      esac
       ${SUDO:-} systemctl daemon-reload
       ${SUDO:-} systemctl restart duckterm-hookd
     else
