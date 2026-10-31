@@ -99,11 +99,13 @@ Cursor、Droid、Qoder、Amp、Gemini、Antigravity、Grok Build、Pi 与 Devin*
 ```sh
 brew install ducksee/tap/duckterm-hookd && \
   "$(brew --prefix duckterm-hookd)/bin/duckterm-hookd" setup --qr
+brew services start duckterm-hookd
 ```
 
 Homebrew 同时管理软件包与后台服务。配置向导会发现已安装的 Agent、保留已有的
-第三方 Hook、启动 Hookd，并显示配对二维码。以后遇到配置问题，也可以安全地
-重新运行这条命令进行修复。
+第三方 Hook，并显示配对二维码。下一行登记登录后自启的服务。请单独写这一行：
+`setup` 可能已经配对成功但仍以非零状态退出，用 `&&` 串起来会跳过启动。以后
+遇到配置问题，也可以安全地重新运行 `setup` 进行修复。
 
 不使用 Homebrew 时，也可以运行下面 Linux/macOS 共用的直接安装脚本。
 

@@ -105,11 +105,14 @@ preview coverage can differ by agent version.
 ```sh
 brew install ducksee/tap/duckterm-hookd && \
   "$(brew --prefix duckterm-hookd)/bin/duckterm-hookd" setup --qr
+brew services start duckterm-hookd
 ```
 
 Homebrew owns both the package and its background service. Setup detects
-installed agents, preserves their existing third-party hooks, starts Hookd, and
-shows the pairing QR. It is safe to run again as a repair command.
+installed agents, preserves their existing third-party hooks, and shows the
+pairing QR. The next line registers the login service. Keep it on its own line:
+setup can finish pairing and still exit non-zero, and an `&&` chain would skip
+the start. It is safe to run setup again as a repair command.
 
 Without Homebrew, use the Linux/macOS direct installer below.
 
